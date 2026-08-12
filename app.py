@@ -34,6 +34,7 @@ GITHUB_OWNER = "vuduc1711"
 GITHUB_REPO = "Sentiment-demo"
 GITHUB_BRANCH = "main"
 REPORTS_DIR = "reports"
+PREDICTION_LOGS_DIR = "prediction_logs"
 
 
 # ============================================================
@@ -564,6 +565,77 @@ def save_report_to_github(
     return repo_path
 
 
+
+def save_prediction_log_to_github(
+    *,
+    text: str,
+    result: dict,
+) -> str:
+    """
+    Save each successful prediction as a separate JSON file under
+    prediction_logs/ for model evaluation.
+    """
+    token = get_github_token()
+    if not token:
+        # Prediction should still work even if logging is unavailable.
+        return ""
+
+    created_at = datetime.now(timezone.utc)
+    log_id = uuid.uuid4().hex[:10]
+
+    record = {
+        "log_id": log_id,
+        "created_at_utc": created_at.isoformat(),
+        "text": text,
+        "predicted_label": result.get("label"),
+        "p_positive": result.get("p_positive"),
+        "p_negative": result.get("p_negative"),
+    }
+
+    filename = f"{created_at.strftime('%Y%m%dT%H%M%SZ')}_{log_id}.json"
+    repo_path = f"{PREDICTION_LOGS_DIR}/{filename}"
+
+    api_url = (
+        f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}"
+        f"/contents/{repo_path}"
+    )
+
+    raw = json.dumps(
+        record,
+        ensure_ascii=False,
+        indent=2,
+    ).encode("utf-8")
+
+    payload = {
+        "message": f"Add prediction log {log_id}",
+        "content": base64.b64encode(raw).decode("ascii"),
+        "branch": GITHUB_BRANCH,
+    }
+
+    req = urllib.request.Request(
+        api_url,
+        data=json.dumps(payload).encode("utf-8"),
+        method="PUT",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "Content-Type": "application/json",
+            "User-Agent": "sentiment-demo-streamlit",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=20) as response:
+            if response.status not in (200, 201):
+                return ""
+    except Exception:
+        # Logging should never interrupt normal prediction.
+        return ""
+
+    return repo_path
+
+
 # ============================================================
 # STREAMLIT UI
 # ============================================================
@@ -576,6 +648,7 @@ st.set_page_config(
 
 st.title("Vietnamese Investor Sentiment")
 st.caption("Prediction model for Vietnamese investor sentiment")
+st.caption("Submitted test inputs may be recorded for model evaluation and improvement.")
 
 try:
     model = load_model()
@@ -606,6 +679,12 @@ if st.button("Predict", type="primary", use_container_width=True):
                 "text": text,
                 "result": result,
             }
+
+            # Record successful test inputs/results for model evaluation.
+            save_prediction_log_to_github(
+                text=text,
+                result=result,
+            )
         except Exception as exc:
             st.error(f"Prediction error: {exc}")
             st.session_state.pop("last_prediction", None)
