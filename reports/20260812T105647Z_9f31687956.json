@@ -1,0 +1,11 @@
+{
+  "report_id": "9f31687956",
+  "created_at_utc": "2026-08-12T10:56:47.661088+00:00",
+  "text": "Xúc mạnh vào",
+  "predicted_label": "negative",
+  "p_positive": 0.42604652357082184,
+  "p_negative": 0.5739534764291783,
+  "reason": "Wrong label",
+  "corrected_label": null,
+  "note": ""
+}
