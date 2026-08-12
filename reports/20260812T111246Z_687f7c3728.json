@@ -1,0 +1,11 @@
+{
+  "report_id": "687f7c3728",
+  "created_at_utc": "2026-08-12T11:12:46.135615+00:00",
+  "text": "lãi to",
+  "predicted_label": "negative",
+  "p_positive": 0.37763244532401075,
+  "p_negative": 0.6223675546759893,
+  "reason": "Wrong label",
+  "corrected_label": "negative",
+  "note": ""
+}
