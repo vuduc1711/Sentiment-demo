@@ -1,0 +1,11 @@
+{
+  "report_id": "74ef3091fe",
+  "created_at_utc": "2026-08-12T11:13:09.079131+00:00",
+  "text": "tài khoản hôm nay lãi to rồi bà con ơi",
+  "predicted_label": "negative",
+  "p_positive": 0.01799035588894345,
+  "p_negative": 0.9820096441110564,
+  "reason": "Wrong label",
+  "corrected_label": "positive",
+  "note": ""
+}
