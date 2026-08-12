@@ -2,9 +2,15 @@
 from __future__ import annotations
 
 import ast
+import base64
 import html
+import json
 import re
 import unicodedata
+import urllib.error
+import urllib.request
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +28,12 @@ BASE_DIR = Path(__file__).resolve().parent
 
 MODEL_PATH = BASE_DIR / "linear_svm_calibrated.joblib"
 STOPWORD_PATH = BASE_DIR / "final_stopwords_tokens.pkl"
+
+# Public repo used only for storing user-submitted prediction reports.
+GITHUB_OWNER = "vuduc1711"
+GITHUB_REPO = "Sentiment-demo"
+GITHUB_BRANCH = "main"
+REPORTS_DIR = "reports"
 
 
 # ============================================================
@@ -448,6 +460,110 @@ def predict_sentence(
     }
 
 
+
+# ============================================================
+# REPORT PREDICTION -> GITHUB
+# ============================================================
+
+def get_github_token() -> str | None:
+    """Read the GitHub token from Streamlit Secrets."""
+    try:
+        token = st.secrets.get("GITHUB_TOKEN", None)
+    except Exception:
+        token = None
+
+    if token is None:
+        return None
+
+    token = str(token).strip()
+    return token or None
+
+
+def save_report_to_github(
+    *,
+    text: str,
+    result: dict,
+    reason: str,
+    corrected_label: str | None,
+    note: str,
+) -> str:
+    """
+    Save one report as its own JSON file under reports/.
+    This avoids append conflicts when multiple people report at once.
+    """
+    token = get_github_token()
+    if not token:
+        raise RuntimeError(
+            "Reporting is not configured yet. Missing GITHUB_TOKEN in Streamlit Secrets."
+        )
+
+    created_at = datetime.now(timezone.utc)
+    report_id = uuid.uuid4().hex[:10]
+
+    report = {
+        "report_id": report_id,
+        "created_at_utc": created_at.isoformat(),
+        "text": text,
+        "predicted_label": result.get("label"),
+        "p_positive": result.get("p_positive"),
+        "p_negative": result.get("p_negative"),
+        "reason": reason,
+        "corrected_label": corrected_label,
+        "note": note.strip() if note else "",
+    }
+
+    filename = f"{created_at.strftime('%Y%m%dT%H%M%SZ')}_{report_id}.json"
+    repo_path = f"{REPORTS_DIR}/{filename}"
+
+    api_url = (
+        f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}"
+        f"/contents/{repo_path}"
+    )
+
+    raw = json.dumps(
+        report,
+        ensure_ascii=False,
+        indent=2,
+    ).encode("utf-8")
+
+    payload = {
+        "message": f"Add prediction report {report_id}",
+        "content": base64.b64encode(raw).decode("ascii"),
+        "branch": GITHUB_BRANCH,
+    }
+
+    req = urllib.request.Request(
+        api_url,
+        data=json.dumps(payload).encode("utf-8"),
+        method="PUT",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "Content-Type": "application/json",
+            "User-Agent": "sentiment-demo-streamlit",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=20) as response:
+            if response.status not in (200, 201):
+                raise RuntimeError(
+                    f"GitHub returned HTTP {response.status}"
+                )
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"GitHub API error {exc.code}: {body}"
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(
+            f"Could not connect to GitHub API: {exc}"
+        ) from exc
+
+    return repo_path
+
+
 # ============================================================
 # STREAMLIT UI
 # ============================================================
@@ -459,7 +575,7 @@ st.set_page_config(
 )
 
 st.title("Vietnamese Investor Sentiment")
-st.caption("ASUM + SentProp consensus → Calibrated Linear SVM")
+st.caption("Prediction model for Vietnamese investor sentiment")
 
 try:
     model = load_model()
@@ -472,11 +588,13 @@ text = st.text_area(
     "Nhập câu hoặc đoạn post:",
     height=170,
     placeholder="Ví dụ: múc mạnh anh em ơi",
+    key="input_text",
 )
 
 if st.button("Predict", type="primary", use_container_width=True):
     if not text.strip():
         st.warning("Nhập text trước.")
+        st.session_state.pop("last_prediction", None)
     else:
         try:
             result = predict_sentence(
@@ -484,33 +602,97 @@ if st.button("Predict", type="primary", use_container_width=True):
                 model=model,
                 stopwords=stopwords,
             )
-
-            label = result["label"]
-
-            if label == "positive":
-                st.success("POSITIVE")
-            elif label == "negative":
-                st.error("NEGATIVE")
-            else:
-                st.warning("UNCERTAIN")
-
-            c1, c2 = st.columns(2)
-
-            if result["p_positive"] is None:
-                c1.metric("P(Positive)", "N/A")
-                c2.metric("P(Negative)", "N/A")
-                st.caption(
-                    "Model không nhận được feature TF-IDF nào từ input này."
-                )
-            else:
-                c1.metric(
-                    "P(Positive)",
-                    f"{result['p_positive']:.1%}",
-                )
-                c2.metric(
-                    "P(Negative)",
-                    f"{result['p_negative']:.1%}",
-                )
-
+            st.session_state["last_prediction"] = {
+                "text": text,
+                "result": result,
+            }
         except Exception as exc:
             st.error(f"Prediction error: {exc}")
+            st.session_state.pop("last_prediction", None)
+
+last_prediction = st.session_state.get("last_prediction")
+
+if last_prediction is not None:
+    predicted_text = last_prediction["text"]
+    result = last_prediction["result"]
+    label = result["label"]
+
+    if label == "positive":
+        st.success("POSITIVE")
+    elif label == "negative":
+        st.error("NEGATIVE")
+    else:
+        st.warning("UNCERTAIN")
+
+    c1, c2 = st.columns(2)
+
+    if result["p_positive"] is None:
+        c1.metric("P(Positive)", "N/A")
+        c2.metric("P(Negative)", "N/A")
+        st.caption(
+            "Model không nhận được feature phù hợp từ input này."
+        )
+    else:
+        c1.metric(
+            "P(Positive)",
+            f"{result['p_positive']:.1%}",
+        )
+        c2.metric(
+            "P(Negative)",
+            f"{result['p_negative']:.1%}",
+        )
+
+    st.divider()
+
+    with st.expander("🚩 Report this prediction"):
+        st.caption(
+            "Nếu prediction sai hoặc đáng ngờ, bạn có thể gửi report."
+        )
+
+        with st.form("report_form", clear_on_submit=True):
+            reason = st.radio(
+                "Lý do report",
+                [
+                    "Wrong label",
+                    "Suspicious / uncertain",
+                    "Slang misunderstood",
+                    "Negation misunderstood",
+                    "Other",
+                ],
+                index=0,
+            )
+
+            corrected = st.selectbox(
+                "Theo bạn label đúng là gì? (optional)",
+                ["Không chắc", "positive", "negative", "uncertain"],
+                index=0,
+            )
+
+            note = st.text_area(
+                "Ghi chú thêm (optional)",
+                height=80,
+                placeholder="Ví dụ: câu này là slang bullish.",
+            )
+
+            submit_report = st.form_submit_button(
+                "Submit report",
+                use_container_width=True,
+            )
+
+            if submit_report:
+                corrected_label = (
+                    None if corrected == "Không chắc" else corrected
+                )
+
+                try:
+                    repo_path = save_report_to_github(
+                        text=predicted_text,
+                        result=result,
+                        reason=reason,
+                        corrected_label=corrected_label,
+                        note=note,
+                    )
+                    st.success("Report submitted. Cảm ơn bạn!")
+                    st.caption(f"Saved as: {repo_path}")
+                except Exception as exc:
+                    st.error(f"Không gửi được report: {exc}")
