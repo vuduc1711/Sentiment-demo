@@ -1,58 +1,9 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
-"""
-Predict raw Vietnamese sentences with the SAVED consensus SVM.
-
-Expected location of this script:
-    ...\0_TechnicalSteps\3_ASUM\svm_predict.py
-
-Saved model:
-    ./0_Data/consensus_classifier/svm/linear_svm_calibrated.joblib
-
-Model from Classification.ipynb:
-    Pipeline(
-        TF-IDF word 1-2 grams
-        +
-        CalibratedClassifierCV(LinearSVC)
-    )
-
-The model was trained on `content_tok_final`, so raw terminal input must
-be preprocessed in the same way:
-    raw text
-      -> HTML/URL removal
-      -> lowercase + special-char cleaning
-      -> Underthesea word tokenization
-      -> old stopword removal
-      -> final forum-token cleaning
-      -> joined `content_tok_final`
-      -> saved SVM
-
-Usage
------
-Interactive:
-    python svm_predict.py
-
-One sentence:
-    python svm_predict.py "múc mạnh anh em ơi"
-
-Debug preprocessing:
-    python svm_predict.py --debug "múc mạnh anh em ơi"
-
-Optional uncertainty/reject region:
-    python svm_predict.py --min-confidence 0.60 "múc mạnh anh em ơi"
-
-Without reject region, the SVM remains a pure binary positive/negative model.
-"""
-
 from __future__ import annotations
 
-import argparse
 import ast
 import html
-import json
 import re
-import sys
 import unicodedata
 from pathlib import Path
 from typing import Any
@@ -60,40 +11,21 @@ from typing import Any
 import joblib
 import numpy as np
 import pandas as pd
+import streamlit as st
 
 
 # ============================================================
-# PATHS
+# PATHS — DEPLOY-SAFE FOR GITHUB / STREAMLIT CLOUD
 # ============================================================
 
 BASE_DIR = Path(__file__).resolve().parent
 
-MODEL_PATH = (
-    BASE_DIR
-    / "0_Data"
-    / "consensus_classifier"
-    / "svm"
-    / "linear_svm_calibrated.joblib"
-)
-
-# Exact path used by ASUM.ipynb.
-ABS_STOPWORD_PATH = Path(
-    r"C:\Users\Vu Duc\OneDrive\Desktop\0_AnalystReport"
-    r"\1_ Analyst report and investor sentiment"
-    r"\0_TechnicalSteps\0_Clustering"
-    r"\0_Stopwords\final_stopwords_tokens.pkl"
-)
-
-# Also try sensible relative locations so the script remains portable.
-STOPWORD_CANDIDATES = [
-    ABS_STOPWORD_PATH,
-    BASE_DIR.parent / "0_Clustering" / "0_Stopwords" / "final_stopwords_tokens.pkl",
-    BASE_DIR / "0_Data" / "final_stopwords_tokens.pkl",
-]
+MODEL_PATH = BASE_DIR / "linear_svm_calibrated.joblib"
+STOPWORD_PATH = BASE_DIR / "final_stopwords_tokens.pkl"
 
 
 # ============================================================
-# RAW TEXT CLEANING — copied from ASUM.ipynb preprocessing
+# RAW TEXT CLEANING
 # ============================================================
 
 KEEP_PUNCT = set("%+-")
@@ -140,8 +72,7 @@ def clean_special_chars_v2(
     text = unicodedata.normalize("NFKC", text)
     text = unicodedata.normalize("NFC", text)
 
-    cleaned: list[str] = []
-
+    cleaned = []
     for ch in text:
         if ch.isalnum() or ch.isspace():
             cleaned.append(ch)
@@ -153,7 +84,6 @@ def clean_special_chars_v2(
     text = "".join(cleaned)
     text = REPEATED_SPECIAL_PATTERN.sub(" ", text)
     text = WHITESPACE_PATTERN.sub(" ", text).strip()
-
     return text
 
 
@@ -175,7 +105,6 @@ def preprocess_sentence_text(
     text = remove_urls(text)
     text = text.lower()
     text = clean_special_chars_v2(text, keep_punct=keep_punct)
-
     return text
 
 
@@ -188,23 +117,12 @@ def tokenize_with_underthesea(text_clean: Any) -> list[str]:
         return []
 
     text_clean = str(text_clean).strip()
-
     if not text_clean:
         return []
 
-    try:
-        from underthesea import word_tokenize
-    except ImportError as exc:
-        raise RuntimeError(
-            "Thiếu package underthesea.\n"
-            "Cài bằng:\n"
-            "    pip install underthesea"
-        ) from exc
+    from underthesea import word_tokenize
 
-    tokenized_text = word_tokenize(
-        text_clean,
-        format="text",
-    )
+    tokenized_text = word_tokenize(text_clean, format="text")
 
     return [
         token.strip()
@@ -217,31 +135,14 @@ def tokenize_with_underthesea(text_clean: Any) -> list[str]:
 # STOPWORDS
 # ============================================================
 
-def resolve_stopword_path(custom_path: str | None = None) -> Path:
-    if custom_path:
-        p = Path(custom_path)
-        if p.exists():
-            return p
-        raise FileNotFoundError(f"Không thấy stopword file: {p}")
+@st.cache_resource
+def load_stopwords() -> set[str]:
+    if not STOPWORD_PATH.exists():
+        raise FileNotFoundError(
+            f"Không tìm thấy stopword file: {STOPWORD_PATH}"
+        )
 
-    for p in STOPWORD_CANDIDATES:
-        if p.exists():
-            return p
-
-    attempted = "\n".join(f"  - {p}" for p in STOPWORD_CANDIDATES)
-
-    raise FileNotFoundError(
-        "Không tìm thấy final_stopwords_tokens.pkl.\n"
-        "Đã thử:\n"
-        f"{attempted}\n\n"
-        "Có thể truyền thủ công:\n"
-        '    python svm_predict.py --stopwords "FULL_PATH_TO_PKL"'
-    )
-
-
-def load_stopwords(custom_path: str | None = None):
-    p = resolve_stopword_path(custom_path)
-    loaded = pd.read_pickle(p)
+    loaded = pd.read_pickle(STOPWORD_PATH)
 
     if isinstance(loaded, pd.Series):
         stopwords = set(
@@ -251,10 +152,7 @@ def load_stopwords(custom_path: str | None = None):
             .str.lower()
         )
 
-    elif isinstance(
-        loaded,
-        (list, tuple, set, np.ndarray),
-    ):
+    elif isinstance(loaded, (list, tuple, set, np.ndarray)):
         stopwords = {
             str(x).strip().lower()
             for x in loaded
@@ -263,12 +161,11 @@ def load_stopwords(custom_path: str | None = None):
 
     else:
         raise TypeError(
-            "Stopword object có type không dự kiến: "
-            f"{type(loaded)}"
+            f"Stopword object có type không dự kiến: {type(loaded)}"
         )
 
     stopwords.discard("")
-    return stopwords, p
+    return stopwords
 
 
 def remove_stopwords_from_tokens(
@@ -289,7 +186,7 @@ def remove_stopwords_from_tokens(
 
 
 # ============================================================
-# FINAL TOKEN CLEANING — same as ASUM.ipynb
+# FINAL TOKEN CLEANING
 # ============================================================
 
 def ensure_token_list(
@@ -315,12 +212,10 @@ def ensure_token_list(
         if value.startswith("[") and value.endswith("]"):
             try:
                 parsed = ast.literal_eval(value)
-
                 if isinstance(parsed, (list, tuple, set)):
                     tokens = list(parsed)
                 else:
                     tokens = value.split()
-
             except (ValueError, SyntaxError):
                 tokens = value.split()
         else:
@@ -406,22 +301,10 @@ def clean_forum_tokens_final(
     remove_spam_like: bool = True,
     remove_repeat_char: bool = True,
     lowercase: bool = True,
-) -> tuple[list[str], dict[str, int]]:
-    tokens = ensure_token_list(
-        tokens,
-        lowercase=lowercase,
-    )
+) -> list[str]:
+    tokens = ensure_token_list(tokens, lowercase=lowercase)
 
-    cleaned_tokens: list[str] = []
-
-    removal_counts = {
-        "too_short": 0,
-        "number": 0,
-        "symbols_only": 0,
-        "url_like": 0,
-        "spam_like": 0,
-        "repeat_char": 0,
-    }
+    cleaned_tokens = []
 
     for token in tokens:
         token = str(token).strip()
@@ -430,32 +313,26 @@ def clean_forum_tokens_final(
             token = token.lower()
 
         if min_len is not None and len(token) < min_len:
-            removal_counts["too_short"] += 1
             continue
 
         if remove_numbers and is_number_token(token):
-            removal_counts["number"] += 1
             continue
 
         if remove_symbols_only and is_symbols_only_token(token):
-            removal_counts["symbols_only"] += 1
             continue
 
         if remove_url_like and is_url_like_token(token):
-            removal_counts["url_like"] += 1
             continue
 
         if remove_spam_like and is_spam_like_token(token):
-            removal_counts["spam_like"] += 1
             continue
 
         if remove_repeat_char and has_repeat_char_spam(token):
-            removal_counts["repeat_char"] += 1
             continue
 
         cleaned_tokens.append(token)
 
-    return cleaned_tokens, removal_counts
+    return cleaned_tokens
 
 
 # ============================================================
@@ -465,19 +342,17 @@ def clean_forum_tokens_final(
 def preprocess_one_sentence(
     sentence_raw: str,
     stopwords: set[str],
-):
+) -> str:
     sentence_clean = preprocess_sentence_text(sentence_raw)
 
-    sentence_tokens = tokenize_with_underthesea(
-        sentence_clean
-    )
+    sentence_tokens = tokenize_with_underthesea(sentence_clean)
 
     sentence_tokens_sw = remove_stopwords_from_tokens(
         sentence_tokens,
         stopwords=stopwords,
     )
 
-    sentence_tokens_final, removed = clean_forum_tokens_final(
+    sentence_tokens_final = clean_forum_tokens_final(
         sentence_tokens_sw,
         min_len=2,
         remove_numbers=True,
@@ -488,312 +363,154 @@ def preprocess_one_sentence(
         lowercase=True,
     )
 
-    content_tok_final = " ".join(sentence_tokens_final)
-
-    return {
-        "raw_text": sentence_raw,
-        "sentence_clean": sentence_clean,
-        "sentence_tokens": sentence_tokens,
-        "sentence_tokens_sw": sentence_tokens_sw,
-        "sentence_tokens_final": sentence_tokens_final,
-        "content_tok_final": content_tok_final,
-        "n_tokens": len(sentence_tokens),
-        "n_tokens_sw": len(sentence_tokens_sw),
-        "n_tokens_final": len(sentence_tokens_final),
-        "n_stopwords_removed": (
-            len(sentence_tokens) - len(sentence_tokens_sw)
-        ),
-        "removed": removed,
-    }
+    return " ".join(sentence_tokens_final)
 
 
 # ============================================================
-# LOAD SAVED SVM
+# MODEL
 # ============================================================
 
-def load_svm(model_path: str | None = None):
-    p = Path(model_path) if model_path else MODEL_PATH
-
-    if not p.exists():
+@st.cache_resource
+def load_model():
+    if not MODEL_PATH.exists():
         raise FileNotFoundError(
-            "Không thấy saved SVM:\n"
-            f"    {p}\n\n"
-            "Classification.ipynb save model tại:\n"
-            "    ./0_Data/consensus_classifier/svm/"
-            "linear_svm_calibrated.joblib"
+            f"Không tìm thấy saved SVM: {MODEL_PATH}"
         )
 
-    model = joblib.load(p)
+    model = joblib.load(MODEL_PATH)
 
     if not hasattr(model, "predict"):
-        raise TypeError(
-            "Object load được không có predict()."
-        )
+        raise TypeError("Model không có predict().")
 
     if not hasattr(model, "predict_proba"):
-        raise TypeError(
-            "Model không có predict_proba(). "
-            "Expected calibrated LinearSVC pipeline."
-        )
+        raise TypeError("Model không có predict_proba().")
 
-    return model, p
+    return model
 
 
-# ============================================================
-# PREDICT
-# ============================================================
+def get_vectorizer(model):
+    """
+    Find the TF-IDF vectorizer inside the saved sklearn Pipeline.
+    Used only to detect a completely OOV / zero-feature input.
+    """
+    if hasattr(model, "named_steps"):
+        for step in model.named_steps.values():
+            if hasattr(step, "vocabulary_") and hasattr(step, "transform"):
+                return step
+    return None
+
 
 def predict_sentence(
     text: str,
     model,
     stopwords: set[str],
-    min_confidence: float | None = None,
 ):
-    prep = preprocess_one_sentence(
+    model_text = preprocess_one_sentence(
         text,
         stopwords=stopwords,
     )
 
-    model_text = prep["content_tok_final"]
-
     if not model_text:
         return {
-            **prep,
-            "svm_y": None,
-            "svm_label_binary": None,
-            "svm_label": "uncertain",
-            "svm_prob_positive": None,
-            "svm_prob_negative": None,
-            "svm_confidence": 0.0,
-            "svm_margin": 0.0,
-            "warning": (
-                "Không còn token nào sau preprocessing; "
-                "không gọi SVM."
-            ),
+            "label": "uncertain",
+            "p_positive": None,
+            "p_negative": None,
         }
 
-    X = [model_text]
+    # Important: do not interpret a zero TF-IDF vector as negative.
+    vectorizer = get_vectorizer(model)
+    if vectorizer is not None:
+        x_tfidf = vectorizer.transform([model_text])
+        if x_tfidf.nnz == 0:
+            return {
+                "label": "uncertain",
+                "p_positive": None,
+                "p_negative": None,
+            }
 
-    y = int(model.predict(X)[0])
-
-    prob = model.predict_proba(X)[0]
-
-    # Do not assume column 1 blindly; resolve class positions.
+    probs = model.predict_proba([model_text])[0]
     classes = list(model.classes_)
 
     if 1 not in classes or 0 not in classes:
         raise ValueError(
-            f"Expected model classes [0,1], got {classes}"
+            f"Expected model classes [0, 1], got {classes}"
         )
 
-    p_pos = float(prob[classes.index(1)])
-    p_neg = float(prob[classes.index(0)])
+    p_pos = float(probs[classes.index(1)])
+    p_neg = float(probs[classes.index(0)])
 
-    binary_label = (
-        "positive"
-        if y == 1
-        else "negative"
-    )
-
-    confidence = max(p_pos, p_neg)
-    margin = abs(p_pos - 0.5) * 2.0
-
-    if (
-        min_confidence is not None
-        and confidence < min_confidence
-    ):
-        final_label = "uncertain"
-    else:
-        final_label = binary_label
+    label = "positive" if p_pos >= p_neg else "negative"
 
     return {
-        **prep,
-        "svm_y": y,
-        "svm_label_binary": binary_label,
-        "svm_label": final_label,
-        "svm_prob_positive": p_pos,
-        "svm_prob_negative": p_neg,
-        "svm_confidence": confidence,
-        "svm_margin": margin,
-        "warning": None,
+        "label": label,
+        "p_positive": p_pos,
+        "p_negative": p_neg,
     }
 
 
 # ============================================================
-# OUTPUT
+# STREAMLIT UI
 # ============================================================
 
-def print_result(
-    result: dict,
-    *,
-    debug: bool = False,
-    as_json: bool = False,
-):
-    if as_json:
-        minimal = {
-            "label": result["svm_label"],
-            "p_positive": result["svm_prob_positive"],
-            "p_negative": result["svm_prob_negative"],
-        }
-        print(
-            json.dumps(
-                minimal,
-                ensure_ascii=False,
-                default=str,
-            )
-        )
-        return
+st.set_page_config(
+    page_title="Vietnamese Investor Sentiment",
+    page_icon="📈",
+    layout="centered",
+)
 
-    print(f"label      : {result['svm_label']}")
+st.title("Vietnamese Investor Sentiment")
+st.caption("ASUM + SentProp consensus → Calibrated Linear SVM")
 
-    if result["svm_prob_positive"] is None:
-        print("p_positive : None")
-        print("p_negative : None")
+try:
+    model = load_model()
+    stopwords = load_stopwords()
+except Exception as exc:
+    st.error(f"Không load được model/data: {exc}")
+    st.stop()
+
+text = st.text_area(
+    "Nhập câu hoặc đoạn post:",
+    height=170,
+    placeholder="Ví dụ: múc mạnh anh em ơi",
+)
+
+if st.button("Predict", type="primary", use_container_width=True):
+    if not text.strip():
+        st.warning("Nhập text trước.")
     else:
-        print(
-            f"p_positive : "
-            f"{result['svm_prob_positive']:.4f}"
-        )
-        print(
-            f"p_negative : "
-            f"{result['svm_prob_negative']:.4f}"
-        )
-
-
-# ============================================================
-# CLI
-# ============================================================
-
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description=(
-            "Load the saved calibrated Linear SVM from "
-            "Classification.ipynb and predict new raw sentences."
-        )
-    )
-
-    parser.add_argument(
-        "text",
-        nargs="*",
-        help=(
-            "Raw Vietnamese sentence. "
-            "If omitted, interactive mode is used."
-        ),
-    )
-
-    parser.add_argument(
-        "--model",
-        type=str,
-        default=None,
-        help="Override saved model path.",
-    )
-
-    parser.add_argument(
-        "--stopwords",
-        type=str,
-        default=None,
-        help="Override final_stopwords_tokens.pkl path.",
-    )
-
-    parser.add_argument(
-        "--min-confidence",
-        type=float,
-        default=None,
-        help=(
-            "Optional reject threshold. "
-            "Example 0.60 => confidence < 0.60 becomes uncertain. "
-            "Default is None, preserving the original binary SVM."
-        ),
-    )
-
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Show all preprocessing stages.",
-    )
-
-    parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Print JSON output.",
-    )
-
-    return parser.parse_args()
-
-
-def main():
-    args = parse_args()
-
-    if (
-        args.min_confidence is not None
-        and not (0.5 <= args.min_confidence <= 1.0)
-    ):
-        print(
-            "ERROR: --min-confidence phải nằm trong [0.5, 1.0].",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    try:
-        model, model_path = load_svm(args.model)
-
-        stopwords, stopword_path = load_stopwords(
-            args.stopwords
-        )
-
-        # Minimal show-off mode: no startup diagnostics.
-
-
-        if args.text:
-            text = " ".join(args.text).strip()
-
+        try:
             result = predict_sentence(
                 text=text,
                 model=model,
                 stopwords=stopwords,
-                min_confidence=args.min_confidence,
             )
 
-            print_result(
-                result,
-                debug=args.debug,
-                as_json=args.json,
-            )
-            return
+            label = result["label"]
 
-        print("Nhập câu cần predict. Ctrl+C / Ctrl+D để thoát.\n")
+            if label == "positive":
+                st.success("POSITIVE")
+            elif label == "negative":
+                st.error("NEGATIVE")
+            else:
+                st.warning("UNCERTAIN")
 
-        while True:
-            try:
-                text = input("> ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print()
-                break
+            c1, c2 = st.columns(2)
 
-            if not text:
-                continue
+            if result["p_positive"] is None:
+                c1.metric("P(Positive)", "N/A")
+                c2.metric("P(Negative)", "N/A")
+                st.caption(
+                    "Model không nhận được feature TF-IDF nào từ input này."
+                )
+            else:
+                c1.metric(
+                    "P(Positive)",
+                    f"{result['p_positive']:.1%}",
+                )
+                c2.metric(
+                    "P(Negative)",
+                    f"{result['p_negative']:.1%}",
+                )
 
-            result = predict_sentence(
-                text=text,
-                model=model,
-                stopwords=stopwords,
-                min_confidence=args.min_confidence,
-            )
-
-            print_result(
-                result,
-                debug=args.debug,
-                as_json=args.json,
-            )
-            print()
-
-    except Exception as exc:
-        print(
-            f"ERROR: {exc}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()
+        except Exception as exc:
+            st.error(f"Prediction error: {exc}")
